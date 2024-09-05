@@ -7,6 +7,10 @@ import numpy as np
 from tqdm import tqdm
 import json
 
+# Define constants
+nation = "Germany"
+data_path = "data/PRE-event"
+
 # Create the data directory if it doesn't exist
 os.makedirs('data', exist_ok=True)
 
@@ -15,8 +19,8 @@ s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
 # Specify bucket and file details
 bucket_name = 'spacenet-dataset'
-file_key = 'spacenet/SN8_floods/tarballs/Germany_Training_Public.tar.gz'
-download_path = 'data/Germany_Training_Public.tar.gz'
+file_key = f'spacenet/SN8_floods/tarballs/{nation}_Training_Public.tar.gz'
+download_path = f'data/{nation}_Training_Public.tar.gz'
 
 # Download the file
 s3.download_file(bucket_name, file_key, download_path)
@@ -81,13 +85,9 @@ def process_images(data_path, nation, num_patches_w=5, num_patches_h=6):
     with open(os.path.join(output_dir, "dataset.json"), "w") as f:
         json.dump(labels, f)
 
-# Define constants
-nation = "Germany"
-data_path = "data/PRE-event"
-
 # Process the images to extract patches
 process_images(data_path, nation)
 
 # Create the dataset and start training
 os.system(f"python dataset_tool.py --source data/PRE-event-{nation}-patches --dest datasets/PRE-event-{nation}-patches --resolution=256x256")
-os.system("python train.py --outdir=result/ --data=datasets/PRE-event-Germany-patches --cond=0 --arch=ncsnpp --duration=3.2 --batch=80 --lr=2e-4 --cbase=64 --cres=1,2,2,4,4")
+os.system(f"python train.py --outdir=result/ --data=datasets/PRE-event-{nation}-patches --cond=0 --arch=ncsnpp --duration=3.2 --batch=80 --lr=2e-4 --cbase=64 --cres=1,2,2,4,4")

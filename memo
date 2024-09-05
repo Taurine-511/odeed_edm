@@ -1,5 +1,6 @@
 TODO:
     optimizerをAdamWにするにはハードコードするしかない, train.py
+    odeedでの画像のIO実装
 
 
 Question
