@@ -63,7 +63,7 @@ def process_images(data_path, output_dir, num_patches_w=5, num_patches_h=6):
 
 
 pre_event_path = 'Germany_Training_Public/PRE-event'
-data_path = os.path.join('data', pre_event_path)
+data_path = os.path.join('data/raw_data', pre_event_path)
 output_path = os.path.join('data/patches', pre_event_path)
 
 
