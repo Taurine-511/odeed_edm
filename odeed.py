@@ -8,12 +8,36 @@
 """Minimal standalone example to reproduce the main results from the paper
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
+import os
 import tqdm
+import click
 import pickle
 import numpy as np
 import torch
 import PIL.Image
 import dnnlib
+from torch_utils import misc
+from torch_utils import distributed as dist
+
+# その他設定, 実験由来
+dataset_kwargs = {
+    "class_name": "training.dataset.ImageFolderDataset",
+    "path": "datasets/Germany_Training_Public/PRE-event/test",
+    "use_labels": False,
+    "xflip": False,
+    "cache": True,
+    "resolution": 256,
+    "max_size": 1476
+}
+
+data_loader_kwargs = {
+    "pin_memory": True,
+    "num_workers": 1,
+    "prefetch_factor": 2
+}
+
+batch_size = 80
+seed = 0
 
 #----------------------------------------------------------------------------
 def odeed_sampler(
@@ -28,7 +52,7 @@ def odeed_sampler(
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=x.device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
-    t_steps = torch.cat([t_steps[:1:-1], t_steps])# t_N, ..., t_1(拡散過程), t_0, t_1, ..., t_N(復元過程)
+    t_steps = torch.cat([reversed(t_steps[1:-1]), t_steps])# t_N, ..., t_1(拡散過程), t_0, t_1, ..., t_N(復元過程)
 
     # Main sampling loop.
     #x_next = latents.to(torch.float64) * t_steps[0]
@@ -50,37 +74,83 @@ def odeed_sampler(
 
     return x_next
 
-def reconstruct_image_with_odeed(
-    network_pkl, dataset_path, dest_path, seed=0, device=torch.device('cuda'),
-    num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
-):
-    torch.manual_seed(seed)
+#----------------------------------------------------------------------------
 
-    # Load network.(ここ変更必要、modelのloadをfile pathからできるようにする)
-    print(f'Loading network from "{network_pkl}"...')
-    with dnnlib.util.open_url(network_pkl) as f:
+@click.command()
+@click.option('--network', 'network_pkl',  help='Network pickle filename', metavar='PATH|URL',                      type=str, required=True)
+@click.option('--outdir',                  help='Where to save the output images', metavar='DIR',                   type=str, required=True)
+
+@click.option('--steps', 'num_steps',      help='Number of sampling steps', metavar='INT',                          type=click.IntRange(min=1), default=18, show_default=True)
+@click.option('--sigma_min',               help='Lowest noise level  [default: varies]', metavar='FLOAT',           type=click.FloatRange(min=0, min_open=True))
+@click.option('--sigma_max',               help='Highest noise level  [default: varies]', metavar='FLOAT',          type=click.FloatRange(min=0, min_open=True))
+@click.option('--rho',                     help='Time step exponent', metavar='FLOAT',                              type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)
+
+
+def main(network_pkl, outdir, device=torch.device('cuda'), **sampler_kwargs):
+    """Generate random images using the techniques described in the paper
+    "Elucidating the Design Space of Diffusion-Based Generative Models".
+
+    Examples:
+
+    \b
+    # Generate 64 images and save them as out/*.png
+    python generate.py --outdir=out --seeds=0-63 --batch=64 \\
+        --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
+
+    \b
+    # Generate 1024 images using 2 GPUs
+    torchrun --standalone --nproc_per_node=2 generate.py --outdir=out --seeds=0-999 --batch=64 \\
+        --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
+    """
+    dist.init()
+
+    # Rank 0 goes first.
+    if dist.get_rank() != 0:
+        torch.distributed.barrier()
+
+    # Load network.
+    dist.print0(f'Loading network from "{network_pkl}"...')
+    with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
         net = pickle.load(f)['ema'].to(device)
 
-    # Load dataset.(ここ変更必要、trainと同じノリでloadして出力できるようにする)
-    print(f'Loading dataset from "{dataset_path}"...')
-    dataset = torch.load(dataset_path)
-    latents = dataset['latents'].to(device)
-    class_labels = dataset.get('class_labels', None)
-    idx = np.random.randint(len(latents))
+    # Other ranks follow.
+    if dist.get_rank() == 0:
+        torch.distributed.barrier()
 
-    # Generate image.(ここ変更必要、生成した画像を適切なフォルダ階層で保存できるようにする)
-    print(f'Generating image...')
-    image = odeed_sampler(net, latents[idx:idx+1], class_labels[idx:idx+1], num_steps, sigma_min, sigma_max, rho)
-    image = (image * 127.5 + 128).clip(0, 255).to(torch.uint8)
-    image = image.permute(0, 2, 3, 1).cpu().numpy()
-    PIL.Image.fromarray(image[0], 'RGB').save(dest_path)
-    print('Done.')
-    
 
-def main():
-    model_root = 'models'
-    reconstruct_image_with_odeed(f'{model_root}/edm-spacenet8-256x256-uncond-vp????.pkl',   'output',  num_steps=18) # FID = 1.79, NFE = 35
+    torch.distributed.barrier()
+    # Load dataset.
+    dist.print0('Loading dataset...')
+    dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # subclass of training.dataset.Dataset
+    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, shuffle=False, batch_size=batch_size, **data_loader_kwargs))
 
+    # Loop over batches.
+    dist.print0(f'Generating test dataset images to "{outdir}"...')
+
+    for batch_idx, (images, labels) in enumerate(dataset_iterator):
+        with torch.no_grad():
+            images = images.to(device).to(torch.float32) / 127.5 - 1
+            labels = labels.to(device)
+            
+            # Generate Images
+            sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
+            sampler_fn = odeed_sampler
+            generated_images = sampler_fn(net, images, **sampler_kwargs)
+
+            images_np = (generated_images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            for idx, image_np in enumerate(images_np):
+                img_idx = batch_idx * batch_size + idx
+                image_dir = outdir
+                os.makedirs(image_dir, exist_ok=True)
+                image_path = os.path.join(image_dir, f'{img_idx}.png')
+                if image_np.shape[2] == 1:
+                    PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                else:
+                    PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+
+    # Done.
+    torch.distributed.barrier()
+    dist.print0('Done.')   
 #----------------------------------------------------------------------------
 
 if __name__ == "__main__":

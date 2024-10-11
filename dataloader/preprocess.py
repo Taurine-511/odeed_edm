@@ -3,7 +3,7 @@ import os
 from tqdm import tqdm
 from PIL import Image
 import numpy as np
-
+from sklearn.model_selection import train_test_split
 
 def calculate_overlap(image_size, patch_size=256, num_patches=2):
     """Calculate the appropriate overlap."""
@@ -33,12 +33,12 @@ def extract_patches(image, patch_size=(256, 256), overlap_w=0.5, overlap_h=0.5):
 
     return patches
 
-def process_images(data_path, output_dir, num_patches_w=5, num_patches_h=6):
+def process_images(data_path, img_names, output_dir, num_patches_w=6, num_patches_h=6):
     """Process images and save patches."""
     labels = {"labels": []}
     os.makedirs(output_dir, exist_ok=True)
 
-    for img_name in tqdm(os.listdir(data_path)):
+    for img_name in tqdm(img_names):
         if not img_name.endswith(".tif"):
             continue
         img_path = os.path.join(data_path, img_name)
@@ -61,11 +61,26 @@ def process_images(data_path, output_dir, num_patches_w=5, num_patches_h=6):
     with open(os.path.join(output_dir, "dataset.json"), "w") as f:
         json.dump(labels, f)
 
+def create_train_test_data(data_path, save_dir, train_ratio, num_patches_w=6, num_patches_h=6):
+    files = []
+    for f in os.listdir(data_path):
+        if f.endswith(".tif"):
+            files.append(f)
+    train_size = int(len(files) * train_ratio)
+    test_size = len(files) - train_size
+    train_imgs, test_imgs = train_test_split(files, train_size=train_size, test_size=test_size)
+    train_dir = os.path.join(save_dir, 'train')
+    test_dir = os.path.join(save_dir, 'test')
 
+    process_images(data_path, train_imgs, train_dir, num_patches_w, num_patches_h)
+    process_images(data_path, test_imgs, test_dir, num_patches_w, num_patches_h)
+
+
+train_ratio = 0.8
 pre_event_path = 'Germany_Training_Public/PRE-event'
 data_path = os.path.join('data/raw_data', pre_event_path)
 output_path = os.path.join('data/patches', pre_event_path)
 
 
 # Process the images to extract patches
-process_images(data_path, output_path)
+create_train_test_data(data_path, output_path, train_ratio)
